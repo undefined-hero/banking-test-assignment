@@ -61,10 +61,14 @@ defmodule ExBanking.User do
     {user, amount} = {String.to_atom(user), amount / 1}
 
     try do
+      check_queue_length(user)
       GenServer.call(user, {:deposit, amount, currency})
     catch
-      :exit, _reason ->
+      {_user, :noproc} ->
         {:error, :user_does_not_exist}
+
+      {_user, :too_many_requests} ->
+        {:error, :too_many_requests_to_user}
     end
   end
 
@@ -74,10 +78,14 @@ defmodule ExBanking.User do
     user = String.to_atom(user)
 
     try do
+      check_queue_length(user)
       GenServer.call(user, {:get_balance, currency})
     catch
-      :exit, _reason ->
+      {_user, :noproc} ->
         {:error, :user_does_not_exist}
+
+      {_name, :too_many_requests} ->
+        {:error, :too_many_requests_to_user}
     end
   end
 
@@ -88,13 +96,16 @@ defmodule ExBanking.User do
     {user, amount} = {String.to_atom(user), amount / 1}
 
     try do
+      check_queue_length(user)
       GenServer.call(user, {:withdraw, amount, currency})
     catch
-      :exit, _reason ->
+      {_user, :noproc} ->
         {:error, :user_does_not_exist}
 
-      error ->
-        IO.inspect(error)
+      {_name, :too_many_requests} ->
+        {:error, :too_many_requests_to_user}
+
+      _error ->
         {:error, :not_enough_money}
     end
   end
@@ -108,7 +119,9 @@ defmodule ExBanking.User do
       {String.to_atom(from_user), String.to_atom(to_user), amount / 1}
 
     try do
-      with {:ok, from_user_balance} <- GenServer.call(from_user, {:withdraw, amount, currency}),
+      with :ok <- check_queue_length(from_user),
+           :ok <- check_queue_length(to_user),
+           {:ok, from_user_balance} <- GenServer.call(from_user, {:withdraw, amount, currency}),
            {:ok, to_user_balance} <- GenServer.call(to_user, {:deposit, amount, currency}) do
         {:ok, from_user_balance, to_user_balance}
       else
@@ -116,16 +129,38 @@ defmodule ExBanking.User do
           error
       end
     catch
-      :exit, {:noproc, {GenServer, :call, [^from_user | _tail]}} ->
+      {^from_user, :noproc} ->
         {:error, :sender_does_not_exist}
 
-      :exit, {:noproc, {GenServer, :call, [^to_user | _tail]}} ->
-        GenServer.call(from_user, {:deposit, amount, currency})
+      {^to_user, :noproc} ->
         {:error, :receiver_does_not_exist}
+
+      {^from_user, :too_many_requests} ->
+        {:error, :too_many_requests_to_sender}
+
+      {^to_user, :too_many_requests} ->
+        {:error, :too_many_requests_to_receiver}
     end
   end
 
   def send(_from_user, _to_user, _amount, _currency), do: {:error, :wrong_arguments}
+
+  defp check_queue_length(name) do
+    case GenServer.whereis(name) do
+      nil ->
+        throw({name, :noproc})
+
+      pid ->
+        {:ok, name} = Process.info(pid) |> Keyword.fetch(:registered_name)
+        {:ok, queue_length} = Process.info(pid) |> Keyword.fetch(:message_queue_len)
+
+        if queue_length >= 10 do
+          throw({name, :too_many_requests})
+        end
+
+        :ok
+    end
+  end
 
   defp subtract_money!(account, amount, currency) do
     {_, %{^currency => new_amount} = new_account} =
