@@ -9,21 +9,6 @@ defmodule ExBanking do
 
   @behaviour Interface
 
-  @impl Interface
-  def create_user(user) when is_binary(user) do
-    user = String.to_atom(user)
-
-    case GenServer.start_link(__MODULE__, {user, %{}}, name: user) do
-      {:ok, _pid} ->
-        :ok
-
-      {:error, {:already_started, _pid}} ->
-        {:error, :user_already_exists}
-    end
-  end
-
-  def create_user(_user), do: {:error, :wrong_arguments}
-
   @impl true
   def init(account) do
     {:ok, account}
@@ -32,6 +17,7 @@ defmodule ExBanking do
   @impl true
   def handle_call({:deposit, amount, currency}, _from, {user, account}) do
     {new_account, new_amount} = add_money!(account, amount, currency)
+    Logger.info("User #{to_string(user)} deposits #{currency}")
 
     {:reply, {:ok, new_amount}, {user, new_account}}
   end
@@ -39,9 +25,11 @@ defmodule ExBanking do
   @impl true
   def handle_call({:get_balance, currency}, _from, {user, account}) do
     with {:ok, amount} <- Map.fetch(account, currency) do
+      Logger.info("User #{to_string(user)} checks #{currency} balance")
       {:reply, {:ok, amount}, {user, account}}
     else
       :error ->
+        Logger.info("User #{to_string(user)} checks #{currency} balance")
         {:reply, {:ok, 0}, {user, account}}
     end
   end
@@ -53,20 +41,40 @@ defmodule ExBanking do
         value >= amount ->
           {new_account, new_amount} = subtract_money!(account, amount, currency)
 
+          Logger.info("User #{to_string(user)} withdraws #{currency}")
           {:reply, {:ok, new_amount}, {user, new_account}}
 
         true ->
+          Logger.info("User #{to_string(user)} got #{to_string(:not_enough_money)}")
           {:reply, {:error, :not_enough_money}, {user, account}}
       end
     else
       :error ->
+        Logger.info("User #{to_string(user)} got #{to_string(:not_enough_money)}")
         {:reply, {:error, :not_enough_money}, {user, account}}
     end
   end
 
   @impl Interface
+  def create_user(user) when is_binary(user) do
+    user = String.to_atom(user)
+
+    case GenServer.start_link(__MODULE__, {user, %{}}, name: user) do
+      {:ok, _pid} ->
+        Logger.info("User #{to_string(user)} created")
+        :ok
+
+      {:error, {:already_started, _pid}} ->
+        Logger.info("User #{to_string(user)} #{to_string(:user_already_exists)}")
+        {:error, :user_already_exists}
+    end
+  end
+
+  def create_user(_user), do: {:error, :wrong_arguments}
+
+  @impl Interface
   def deposit(user, amount, currency)
-      when is_binary(user) and is_number(amount) and is_binary(currency) do
+      when is_binary(user) and is_number(amount) and is_binary(currency) and amount >= 0 do
     {user, amount} = {String.to_atom(user), amount / 1}
 
     try do
@@ -103,7 +111,7 @@ defmodule ExBanking do
 
   @impl Interface
   def withdraw(user, amount, currency)
-      when is_binary(user) and is_number(amount) and is_binary(currency) do
+      when is_binary(user) and is_number(amount) and is_binary(currency) and amount >= 0 do
     {user, amount} = {String.to_atom(user), amount / 1}
 
     try do
@@ -126,7 +134,7 @@ defmodule ExBanking do
   @impl Interface
   def send(from_user, to_user, amount, currency)
       when is_binary(from_user) and is_binary(to_user) and is_number(amount) and
-             is_binary(currency) do
+             is_binary(currency) and amount >= 0 do
     {from_user, to_user, amount} =
       {String.to_atom(from_user), String.to_atom(to_user), amount / 1}
 
@@ -135,6 +143,8 @@ defmodule ExBanking do
            :ok <- check_queue_length(to_user),
            {:ok, from_user_balance} <- GenServer.call(from_user, {:withdraw, amount, currency}),
            {:ok, to_user_balance} <- GenServer.call(to_user, {:deposit, amount, currency}) do
+        Logger.info("User #{to_string(from_user)} transfers #{currency} to #{to_string(to_user)}")
+
         {:ok, from_user_balance, to_user_balance}
       else
         error ->
@@ -166,9 +176,7 @@ defmodule ExBanking do
         {:ok, name} = Process.info(pid) |> Keyword.fetch(:registered_name)
         {:ok, queue_length} = Process.info(pid) |> Keyword.fetch(:message_queue_len)
 
-        if queue_length >= 10 do
-          throw({name, :too_many_requests})
-        end
+        if queue_length >= 10, do: throw({name, :too_many_requests})
 
         :ok
     end

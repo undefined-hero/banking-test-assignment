@@ -14,6 +14,10 @@ defmodule ExBankingTest do
     assert {:error, :wrong_arguments} = ExBanking.get_balance("user", 8888)
     assert {:error, :wrong_arguments} = ExBanking.withdraw("user", "TEST", "USD")
     assert {:error, :wrong_arguments} = ExBanking.send("user", 200, 200, "USD")
+
+    assert {:error, :wrong_arguments} = ExBanking.deposit("user", -200, "USD")
+    assert {:error, :wrong_arguments} = ExBanking.withdraw("user", -200, "USD")
+    assert {:error, :wrong_arguments} = ExBanking.send("user", "user2", -200, "USD")
   end
 
   test ":user_does_not_exist" do
