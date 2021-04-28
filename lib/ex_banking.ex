@@ -3,71 +3,14 @@ defmodule ExBanking do
   Test task for Elixir developers.
   """
 
-  use GenServer
   require Logger
   alias ExBanking.Interface
 
   @behaviour Interface
 
-  @impl true
-  def init(account) do
-    {:ok, account}
-  end
-
-  @impl true
-  def handle_call({:deposit, amount, currency}, _from, {user, account}) do
-    {new_account, new_amount} = add_money!(account, amount, currency)
-    Logger.info("User #{to_string(user)} deposits #{currency}")
-
-    {:reply, {:ok, new_amount}, {user, new_account}}
-  end
-
-  @impl true
-  def handle_call({:get_balance, currency}, _from, {user, account}) do
-    with {:ok, amount} <- Map.fetch(account, currency) do
-      Logger.info("User #{to_string(user)} checks #{currency} balance")
-      {:reply, {:ok, amount}, {user, account}}
-    else
-      :error ->
-        Logger.info("User #{to_string(user)} checks #{currency} balance")
-        {:reply, {:ok, 0}, {user, account}}
-    end
-  end
-
-  @impl true
-  def handle_call({:withdraw, amount, currency}, _from, {user, account}) do
-    with {:ok, value} <- Map.fetch(account, currency) do
-      cond do
-        value >= amount ->
-          {new_account, new_amount} = subtract_money!(account, amount, currency)
-
-          Logger.info("User #{to_string(user)} withdraws #{currency}")
-          {:reply, {:ok, new_amount}, {user, new_account}}
-
-        true ->
-          Logger.info("User #{to_string(user)} got #{to_string(:not_enough_money)}")
-          {:reply, {:error, :not_enough_money}, {user, account}}
-      end
-    else
-      :error ->
-        Logger.info("User #{to_string(user)} got #{to_string(:not_enough_money)}")
-        {:reply, {:error, :not_enough_money}, {user, account}}
-    end
-  end
-
   @impl Interface
   def create_user(user) when is_binary(user) do
-    user = String.to_atom(user)
-
-    case GenServer.start_link(__MODULE__, {user, %{}}, name: user) do
-      {:ok, _pid} ->
-        Logger.info("User #{to_string(user)} created")
-        :ok
-
-      {:error, {:already_started, _pid}} ->
-        Logger.info("User #{to_string(user)} #{to_string(:user_already_exists)}")
-        {:error, :user_already_exists}
-    end
+    DynamicSupervisor.start_child(ExBanking.DynamicSupervisor, {ExBanking.UserAccountServer, user})
   end
 
   def create_user(_user), do: {:error, :wrong_arguments}
@@ -75,12 +18,10 @@ defmodule ExBanking do
   @impl Interface
   def deposit(user, amount, currency)
       when is_binary(user) and is_number(amount) and is_binary(currency) and amount >= 0 do
-    {user, amount} = {String.to_atom(user), amount / 1}
-
-    try do
-      check_queue_length(user)
+    with {user, amount} <- {String.to_atom(user), amount / 1},
+      :ok <- check_queue_length(user) do
       GenServer.call(user, {:deposit, amount, currency})
-    catch
+    else
       {_user, :noproc} ->
         {:error, :user_does_not_exist}
 
@@ -93,12 +34,10 @@ defmodule ExBanking do
 
   @impl Interface
   def get_balance(user, currency) when is_binary(user) and is_binary(currency) do
-    user = String.to_atom(user)
-
-    try do
-      check_queue_length(user)
+    with user <- String.to_atom(user),
+      :ok <- check_queue_length(user) do
       GenServer.call(user, {:get_balance, currency})
-    catch
+    else
       {_user, :noproc} ->
         {:error, :user_does_not_exist}
 
@@ -112,12 +51,10 @@ defmodule ExBanking do
   @impl Interface
   def withdraw(user, amount, currency)
       when is_binary(user) and is_number(amount) and is_binary(currency) and amount >= 0 do
-    {user, amount} = {String.to_atom(user), amount / 1}
-
-    try do
-      check_queue_length(user)
+    with {user, amount} <- {String.to_atom(user), amount / 1},
+      :ok <- check_queue_length(user) do
       GenServer.call(user, {:withdraw, amount, currency})
-    catch
+    else
       {_user, :noproc} ->
         {:error, :user_does_not_exist}
 
@@ -138,19 +75,14 @@ defmodule ExBanking do
     {from_user, to_user, amount} =
       {String.to_atom(from_user), String.to_atom(to_user), amount / 1}
 
-    try do
-      with :ok <- check_queue_length(from_user),
-           :ok <- check_queue_length(to_user),
-           {:ok, from_user_balance} <- GenServer.call(from_user, {:withdraw, amount, currency}),
-           {:ok, to_user_balance} <- GenServer.call(to_user, {:deposit, amount, currency}) do
-        Logger.info("User #{to_string(from_user)} transfers #{currency} to #{to_string(to_user)}")
+    with :ok <- check_queue_length(from_user),
+          :ok <- check_queue_length(to_user),
+          {:ok, from_user_balance} <- GenServer.call(from_user, {:withdraw, amount, currency}),
+          {:ok, to_user_balance} <- GenServer.call(to_user, {:deposit, amount, currency}) do
+      Logger.info("User #{to_string(from_user)} transfers #{currency} to #{to_string(to_user)}")
 
-        {:ok, from_user_balance, to_user_balance}
-      else
-        error ->
-          error
-      end
-    catch
+      {:ok, from_user_balance, to_user_balance}
+    else
       {^from_user, :noproc} ->
         {:error, :sender_does_not_exist}
 
@@ -162,6 +94,9 @@ defmodule ExBanking do
 
       {^to_user, :too_many_requests} ->
         {:error, :too_many_requests_to_receiver}
+
+      error ->
+        error
     end
   end
 
@@ -170,41 +105,17 @@ defmodule ExBanking do
   defp check_queue_length(name) do
     case GenServer.whereis(name) do
       nil ->
-        throw({name, :noproc})
+        {name, :noproc}
 
       pid ->
         {:ok, name} = Process.info(pid) |> Keyword.fetch(:registered_name)
         {:ok, queue_length} = Process.info(pid) |> Keyword.fetch(:message_queue_len)
 
-        if queue_length >= 10, do: throw({name, :too_many_requests})
-
-        :ok
+        if queue_length >= 10 do
+          {name, :too_many_requests}
+        else
+          :ok
+        end
     end
-  end
-
-  defp subtract_money!(account, amount, currency) do
-    {_, %{^currency => new_amount} = new_account} =
-      Map.get_and_update(account, currency, fn
-        nil ->
-          {nil, amount}
-
-        value ->
-          {value, if(value >= amount, do: Float.round(value - amount, 2), else: amount)}
-      end)
-
-    {new_account, new_amount}
-  end
-
-  defp add_money!(account, amount, currency) do
-    {_, %{^currency => new_amount} = new_account} =
-      Map.get_and_update(account, currency, fn
-        nil ->
-          {nil, amount}
-
-        value ->
-          {value, Float.round(value + amount, 2)}
-      end)
-
-    {new_account, new_amount}
   end
 end
